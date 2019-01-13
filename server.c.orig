@@ -1,0 +1,450 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <assert.h>
+
+// thread pool pre code
+#define MAX_THREADS 64
+#define MAX_QUEUE 65536
+#define SIZE 8192  //work queue size
+
+typedef struct threadpool_t threadpool_t;
+
+typedef enum {
+	threadpool_invalid        = -1,
+	threadpool_lock_failure   = -2,
+	threadpool_queue_full     = -3,
+	threadpool_shutdown       = -4,
+	threadpool_thread_failure = -5
+} threadpool_error_t;
+
+typedef enum {
+	threadpool_graceful       = 1
+} threadpool_destroy_flags_t;
+
+threadpool_t *threadpool_create(int thread_count, int queue_size, int flags);
+int threadpool_add(threadpool_t *pool, void (*routine)(void *),
+		void *arg, int flags);
+int threadpool_destroy(threadpool_t *pool, int flags);
+//thread pool pre code end
+
+void check_exist(char[], char*);
+void condition(int, char*);
+int get_file_type(char*, char*);
+void start_working(void*);
+pthread_mutex_t lock;
+threadpool_t *pool;
+char global_locate[256] = {};
+int main(int argc, char *argv[])
+{
+	sscanf(argv[2], "%s", global_locate);
+	if(global_locate[strlen(global_locate)-1] != '/')
+		strcat(global_locate, "/");
+
+	//phtread part
+	pthread_mutex_init(&lock, NULL);
+	if(argc >= 7) {
+		pool = threadpool_create(atoi(argv[6]), SIZE, 0);
+	}
+	assert(pool != NULL);
+
+	//socket的建立
+	int sockfd = 0,forClientSockfd = 0;
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (sockfd == -1) {
+		printf("Fail to create a socket.");
+	}
+
+	//socket的連線
+	struct sockaddr_in serverInfo,clientInfo;
+	int addrlen = sizeof(clientInfo);
+	bzero(&serverInfo,sizeof(serverInfo));
+
+	serverInfo.sin_family = PF_INET;
+	serverInfo.sin_addr.s_addr = INADDR_ANY;
+	serverInfo.sin_port = htons(atoi(argv[4]));
+	bind(sockfd,(struct sockaddr *)&serverInfo,sizeof(serverInfo));
+	listen(sockfd,5);
+
+	while(1) {
+		forClientSockfd = accept(sockfd,(struct sockaddr*) &clientInfo, &addrlen);
+		assert(threadpool_add(pool, &start_working, &forClientSockfd, 0) == 0);
+	}
+	return 0;
+}
+
+void start_working(void *client_sockfd)
+{
+	pthread_mutex_lock(&lock);
+	char inputBuffer[256] = {};
+	int *forClientSockfd = (int*)client_sockfd;
+	recv(*forClientSockfd,inputBuffer,sizeof(inputBuffer),0);
+
+	// input cut
+	char message[2048] = "HTTP/1.x ";
+	char *inputbar[4];
+	inputbar[0] = strtok(inputBuffer, " ");
+	inputbar[1] = strtok(NULL, " ");
+	inputbar[2] = strtok(NULL, " ");
+	inputbar[3] = strtok(NULL, " ");
+	if(strcmp(inputbar[0], "GET") == 0) check_exist(inputbar[1], message);
+	else condition(405, message);
+//	for(int i=0 ; i<4; ++i) printf("Get:%s\n",inputbar[i]);
+	//
+	send(*forClientSockfd,message,sizeof(message),0);
+	pthread_mutex_unlock(&lock);
+}
+
+void check_exist(char inputpath[], char* output)
+{
+	if(inputpath[0] != '/') {
+		condition(400, output);
+		return 0;
+	}
+	char prepath[128] = {};
+	char path[256] = {};
+	sscanf(inputpath, "/%s", prepath);
+	sscanf(global_locate, "/%s", path);
+	strcat(path, prepath);
+//	printf("path::%s\n", path);
+	DIR* dir = opendir(path);
+	if(dir) {
+		// dir exist
+//		printf("dir exist\n");
+		condition(200, output);
+		strcat(output, "Content-type: directory\nServer: httpserver/1.x\n\n");
+		struct dirent *de;
+		while ((de = readdir(dir)) != NULL) {
+			if(strcmp(de->d_name, "..") == 0 || strcmp(de->d_name, ".") == 0)
+				continue;
+			strcat(output, de->d_name);
+			strcat(output, " ");
+		}
+		strcat(output, "\n");
+		closedir(dir);
+	} else {
+		FILE* fp = fopen(path, "r");
+		if(fp) {
+			//file exist
+//			printf("file exist\n");
+			if(get_file_type(path, output) == 415) {
+				close(fp);
+				return 0;
+			} else {
+				char r1[256];
+				while (fgets(r1, 256, fp)) {
+					//fscanf(fp, "%s", &r1);
+					//fgets(r1, 256, fp);
+					strcat(output, r1);
+				}
+			}
+			fclose(fp);
+			strcat(output, "\n");
+		} else {
+			// not exist
+//			printf("not exist\n");
+			condition(404, output);
+		}
+	}
+}
+
+int get_file_type(char *filename, char* output)
+{
+	char typename[50];
+	strtok(filename, ".");
+	sprintf(typename, "%s", strtok(NULL, "."));
+	if(strcmp(typename, "htm") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/html\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "html") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/html\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "css") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/css\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "h") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/x-h\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "hh") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/x-h\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "c") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/x-c\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "cc") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: text/x-c\nServer: httpserver/1.x\r\n\r\n");
+	} else if(strcmp(typename, "json") == 0) {
+		condition(200, output);
+		strcat(output, "Content-type: application/json\nServer: httpserver/1.x\r\n\r\n");
+	} else {
+		condition(415, output);
+		return 415;
+	}
+	return 200;
+}
+
+void condition(int condition, char* output)
+{
+	if(condition == 200) {
+		strcat(output, "200 OK\n");
+	} else if(condition == 400) {
+		strcat(output, "400 BAD_REQUEST\nContent-type: \nServer: httpserver/1.x\r\n\r\n\n");
+	} else if(condition == 404) {
+		strcat(output, "404 NOt_FOUND\nContent-type: \nServer: httpserver/1.x\r\n\r\n\n");
+	} else if(condition == 405) {
+		strcat(output, "405 METHOD_NOT_ALLOWED\nContent-type: \nServer: httpserver/1.x\r\n\r\n\n");
+	} else {
+		strcat(output, "415 UNSUPPORTED_MEDIA_TYPE\nContent-type: \nServer: httpserver/1.x\r\n\r\n\n");
+	}
+}
+
+//thread pool code
+
+typedef enum {
+	immediate_shutdown = 1,
+	graceful_shutdown  = 2
+} threadpool_shutdown_t;
+
+typedef struct {
+	void (*function)(void *);
+	void *argument;
+} threadpool_task_t;
+
+struct threadpool_t {
+	pthread_mutex_t lock;
+	pthread_cond_t notify;
+	pthread_t *threads;
+	threadpool_task_t *queue;
+	int thread_count;
+	int queue_size;
+	int head;
+	int tail;
+	int count;
+	int shutdown;
+	int started;
+};
+
+static void *threadpool_thread(void *threadpool);
+
+int threadpool_free(threadpool_t *pool);
+
+threadpool_t *threadpool_create(int thread_count, int queue_size, int flags)
+{
+	threadpool_t *pool;
+	int i;
+	(void) flags;
+
+	if(thread_count <= 0 || thread_count > MAX_THREADS || queue_size <= 0 || queue_size > MAX_QUEUE) {
+		return NULL;
+	}
+
+	if((pool = (threadpool_t *)malloc(sizeof(threadpool_t))) == NULL) {
+		goto err;
+	}
+
+	/* Initialize */
+	pool->thread_count = 0;
+	pool->queue_size = queue_size;
+	pool->head = pool->tail = pool->count = 0;
+	pool->shutdown = pool->started = 0;
+
+	/* Allocate thread and task queue */
+	pool->threads = (pthread_t *)malloc(sizeof(pthread_t) * thread_count);
+	pool->queue = (threadpool_task_t *)malloc
+		(sizeof(threadpool_task_t) * queue_size);
+
+	/* Initialize mutex and conditional variable first */
+	if((pthread_mutex_init(&(pool->lock), NULL) != 0) ||
+			(pthread_cond_init(&(pool->notify), NULL) != 0) ||
+			(pool->threads == NULL) ||
+			(pool->queue == NULL)) {
+		goto err;
+	}
+
+	/* Start worker threads */
+	for(i = 0; i < thread_count; i++) {
+		if(pthread_create(&(pool->threads[i]), NULL,
+					threadpool_thread, (void*)pool) != 0) {
+			threadpool_destroy(pool, 0);
+			return NULL;
+		}
+		pool->thread_count++;
+		pool->started++;
+	}
+
+	return pool;
+
+err:
+	if(pool) {
+		threadpool_free(pool);
+	}
+	return NULL;
+}
+
+int threadpool_add(threadpool_t *pool, void (*function)(void *),
+		void *argument, int flags)
+{
+	int err = 0;
+	int next;
+	(void) flags;
+
+	if(pool == NULL || function == NULL) {
+		return threadpool_invalid;
+	}
+
+	if(pthread_mutex_lock(&(pool->lock)) != 0) {
+		return threadpool_lock_failure;
+	}
+
+	next = (pool->tail + 1) % pool->queue_size;
+
+	do {
+		/* Are we full ? */
+		if(pool->count == pool->queue_size) {
+			err = threadpool_queue_full;
+			break;
+		}
+
+		/* Are we shutting down ? */
+		if(pool->shutdown) {
+			err = threadpool_shutdown;
+			break;
+		}
+
+		/* Add task to queue */
+		pool->queue[pool->tail].function = function;
+		pool->queue[pool->tail].argument = argument;
+		pool->tail = next;
+		pool->count += 1;
+
+		/* pthread_cond_broadcast */
+		if(pthread_cond_signal(&(pool->notify)) != 0) {
+			err = threadpool_lock_failure;
+			break;
+		}
+	} while(0);
+
+	if(pthread_mutex_unlock(&pool->lock) != 0) {
+		err = threadpool_lock_failure;
+	}
+
+	return err;
+}
+
+int threadpool_destroy(threadpool_t *pool, int flags)
+{
+	int i, err = 0;
+
+	if(pool == NULL) {
+		return threadpool_invalid;
+	}
+
+	if(pthread_mutex_lock(&(pool->lock)) != 0) {
+		return threadpool_lock_failure;
+	}
+
+	do {
+		/* Already shutting down */
+		if(pool->shutdown) {
+			err = threadpool_shutdown;
+			break;
+		}
+
+		pool->shutdown = (flags & threadpool_graceful) ?
+			graceful_shutdown : immediate_shutdown;
+
+		/* Wake up all worker threads */
+		if((pthread_cond_broadcast(&(pool->notify)) != 0) ||
+				(pthread_mutex_unlock(&(pool->lock)) != 0)) {
+			err = threadpool_lock_failure;
+			break;
+		}
+
+		/* Join all worker thread */
+		for(i = 0; i < pool->thread_count; i++) {
+			if(pthread_join(pool->threads[i], NULL) != 0) {
+				err = threadpool_thread_failure;
+			}
+		}
+	} while(0);
+
+	/* Only if everything went well do we deallocate the pool */
+	if(!err) {
+		threadpool_free(pool);
+	}
+	return err;
+}
+
+int threadpool_free(threadpool_t *pool)
+{
+	if(pool == NULL || pool->started > 0) {
+		return -1;
+	}
+
+	/* Did we manage to allocate ? */
+	if(pool->threads) {
+		free(pool->threads);
+		free(pool->queue);
+
+		/* Because we allocate pool->threads after initializing the
+		   mutex and condition variable, we're sure they're
+		   initialized. Let's lock the mutex just in case. */
+		pthread_mutex_lock(&(pool->lock));
+		pthread_mutex_destroy(&(pool->lock));
+		pthread_cond_destroy(&(pool->notify));
+	}
+	free(pool);
+	return 0;
+}
+
+
+static void *threadpool_thread(void *threadpool)
+{
+	threadpool_t *pool = (threadpool_t *)threadpool;
+	threadpool_task_t task;
+
+	for(;;) {
+		/* Lock must be taken to wait on conditional variable */
+		pthread_mutex_lock(&(pool->lock));
+
+		/* Wait on condition variable, check for spurious wakeups.
+		   When returning from pthread_cond_wait(), we own the lock. */
+		while((pool->count == 0) && (!pool->shutdown)) {
+			pthread_cond_wait(&(pool->notify), &(pool->lock));
+		}
+
+		if((pool->shutdown == immediate_shutdown) ||
+				((pool->shutdown == graceful_shutdown) &&
+				 (pool->count == 0))) {
+			break;
+		}
+
+		/* Grab our task */
+		task.function = pool->queue[pool->head].function;
+		task.argument = pool->queue[pool->head].argument;
+		pool->head = (pool->head + 1) % pool->queue_size;
+		pool->count -= 1;
+
+		/* Unlock */
+		pthread_mutex_unlock(&(pool->lock));
+
+		/* Get to work */
+		(*(task.function))(task.argument);
+	}
+
+	pool->started--;
+
+	pthread_mutex_unlock(&(pool->lock));
+	pthread_exit(NULL);
+	return(NULL);
+}
+
+// thread pool code end

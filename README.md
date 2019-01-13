@@ -1,1 +1,1 @@
-# OS-HW-Simple-myhttp-server
+# hw2-simple-my-http-server

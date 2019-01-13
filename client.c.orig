@@ -1,0 +1,264 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <netinet/in.h>
+#include <assert.h>
+#include <pthread.h>
+
+void thread_message(char[]);
+void cut_path(char*, char*);
+void create_dir(char*);
+void create_file(char*, char*);
+void cut_content(char*, char*);
+char filepath[256] = {};
+char argv2[256] = {};
+char argv4[128] = {};
+char argv6[128] = {};
+int global_port = 0;
+char global_net[24] = {};
+
+int main(int argc, char *argv[])
+{
+    // input string cat
+    char message[256] = "GET ";
+    assert(argc > 6);
+    if(argc > 6) {
+        char temp[128] = "";
+        strncpy(temp, argv[2], sizeof(temp));
+        strncpy(filepath, argv[2], sizeof(filepath));
+	strncpy(argv2, argv[2], sizeof(argv2));
+        strcat(message, temp);
+        strcat(message, " HTTP/1.x\r\nHOST: ");
+        strncpy(temp, argv[4], sizeof(temp));
+	strncpy(argv4, argv[4], sizeof(argv4));
+        strcat(message, temp);
+        strcat(message, ":");
+        strncpy(temp, argv[6], sizeof(temp));
+	strncpy(argv6, argv[6], sizeof(argv6));
+        strcat(message, temp);
+        strcat(message, "\r\n\r\n");
+
+        global_port = atoi(argv[6]);
+        sprintf(global_net, "%s", argv[4]);
+    }
+    //socket create
+    int sockfd = 0;
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sockfd == -1) {
+        printf("Fail to create a socket.");
+    }
+
+    //socket connect
+
+    struct sockaddr_in info;
+    bzero(&info,sizeof(info));
+    info.sin_family = PF_INET;
+
+    //localhost test
+    info.sin_addr.s_addr = inet_addr(argv[4]);
+    info.sin_port = htons(atoi(argv[6]));
+
+
+    int err = connect(sockfd,(struct sockaddr *)&info,sizeof(info));
+    if(err==-1) {
+        printf("Connection error");
+    }
+
+
+    //Send a message to server
+    char receiveMessage[4096] = {};
+    send(sockfd,message,sizeof(message),0);
+    recv(sockfd,receiveMessage,sizeof(receiveMessage),0);
+
+    printf("%s",receiveMessage);
+    close(sockfd);
+
+    if(strstr(receiveMessage, "HTTP/1.x 200 OK")) {
+        if(strstr(receiveMessage, "directory")) {
+            create_dir(filepath);
+            char *dirpos = strstr(receiveMessage, "httpserver/1.x");
+            strtok(dirpos, "\n");
+            dirpos = strtok(NULL, "\n");
+            char *pcr;
+            pcr = strtok(dirpos, " ");
+            char backup[512] = {};
+            //thread
+            pthread_t t;
+            //
+            while(pcr != NULL && strcmp(pcr, "(null)") != 0) {
+                //printf("pch at first: %s\n", pcr);
+                char newmessage[100] = "GET ";
+                char temp[50] = "";
+                strncpy(temp, argv[2], sizeof(temp));
+                if(temp[strlen(temp)-1] != '/')	strcat(temp, "/");
+                strcat(temp, pcr);
+                strncpy(filepath, temp, sizeof(filepath));
+                sprintf(backup, "%s", strtok(NULL, ""));
+                strcat(newmessage, temp);
+                strcat(newmessage, " HTTP/1.x\r\nHOST: ");
+                strncpy(temp, argv[4], sizeof(temp));
+                strcat(newmessage, temp);
+                strcat(newmessage, ":");
+                strncpy(temp, argv[6], sizeof(temp));
+                strcat(newmessage, temp);
+                strcat(newmessage, "\r\n\r\n");
+                //thread create
+                pthread_create(&t, NULL, &thread_message, newmessage);
+                pthread_join(t, NULL);
+		strncpy(filepath, argv[2], sizeof(filepath));
+                //	printf("pch before tok : %s\n", pcr);
+                //	printf("backup before tok: %s\n", backup);
+                pcr = strtok(backup, " ");
+                //	printf("backup after tok: %s\n", backup);
+                //      printf("pch after tok : %s\n", pcr);
+            }
+        } else {
+            cut_content(filepath, receiveMessage);
+        }
+    }
+    return 0;
+}
+
+void cut_content(char *path, char* content)
+{
+    char c[4096] = {};
+    sprintf(c, "%s", content);
+    char *contentLocate = strstr(c, "\n\n") + 2;
+    cut_path(path, contentLocate);
+}
+
+void cut_path(char *path, char* content)
+{
+    char p[100] = {};
+    sprintf(p, "%s", path);
+    char* filename = strrchr(p, '/');
+    *filename = 0;
+    create_dir(p);
+    *filename = '/';
+    create_file(p, content);
+
+}
+
+void create_file(char* p, char *content)
+{
+    char filename[100] = {};
+    sprintf(filename, "%s%s", "/output", p);
+    FILE *file = fopen(filename+1,"w");
+    if(file == NULL) {
+        printf( "open failure" );
+        return -1;
+    } else {
+        fprintf(file, "%s", content);
+    }
+    fclose(file);
+}
+
+void create_dir(char *dir)
+{
+    char tmp[256];
+    char *p = NULL;
+    size_t len;
+    struct stat st = {0};
+    snprintf(tmp, sizeof(tmp),"%s%s", "/output", dir);
+    len = strlen(tmp);
+    if(tmp[len - 1] == '/')
+        tmp[len - 1] = 0;
+    for(p = tmp + 1; *p; p++)
+        if(*p == '/') {
+            *p = 0;
+            mkdir(tmp+1, 0777);
+            *p = '/';
+        }
+    mkdir(tmp+1, 0777);
+}
+
+void thread_message(char message[100])
+{
+    //		printf("thread mes: %d\n", sizeof(message));
+    //socket create
+    int sockfd = 0;
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sockfd == -1) {
+        printf("Fail to create a socket.");
+    }
+
+    //socket connect
+
+    struct sockaddr_in info;
+    bzero(&info,sizeof(info));
+    info.sin_family = PF_INET;
+
+    //localhost test
+    info.sin_addr.s_addr = inet_addr(global_net);
+    info.sin_port = htons(global_port);
+
+
+    int err = connect(sockfd,(struct sockaddr *)&info,sizeof(info));
+    if(err==-1) {
+        printf("Connection error");
+    }
+
+
+    //Send a message to server
+    char receiveMessage[4096] = {};
+    send(sockfd,message,100,0);
+    recv(sockfd,receiveMessage,sizeof(receiveMessage),0);
+
+    printf("%s",receiveMessage);
+    close(sockfd);
+
+    char localpath[256] = {};
+    strncpy(localpath, filepath, sizeof(localpath));
+
+    if(strstr(receiveMessage, "HTTP/1.x 200 OK")) {
+        if(strstr(receiveMessage, "directory")) {
+            create_dir(localpath);
+	    char *dirpos = strstr(receiveMessage, "httpserver/1.x");
+            strtok(dirpos, "\n");
+            dirpos = strtok(NULL, "\n");
+            char *pcr;
+            pcr = strtok(dirpos, " ");
+            char backup[512] = {};
+            //thread
+            pthread_t t;
+            //
+            while(pcr != NULL && strcmp(pcr, "(null)") != 0) {
+                //printf("pch at first: %s\n", pcr);
+                char newmessage[100] = "GET ";
+                char temp[50] = "";
+                strncpy(temp, localpath, sizeof(temp));
+                if(temp[strlen(temp)-1] != '/') strcat(temp, "/");
+                strcat(temp, pcr);
+                strncpy(filepath, temp, sizeof(filepath));
+                sprintf(backup, "%s", strtok(NULL, ""));
+                strcat(newmessage, temp);
+                strcat(newmessage, " HTTP/1.x\r\nHOST: ");
+                strncpy(temp, argv4, sizeof(temp));
+                strcat(newmessage, temp);
+                strcat(newmessage, ":");
+                strncpy(temp, argv6, sizeof(temp));
+                strcat(newmessage, temp);
+                strcat(newmessage, "\r\n\r\n");
+                //thread create
+                pthread_create(&t, NULL, &thread_message, newmessage);
+                pthread_join(t, NULL);
+		strncpy(filepath, localpath, sizeof(filepath));
+                //      printf("pch before tok : %s\n", pcr);
+                //      printf("backup before tok: %s\n", backup);
+                pcr = strtok(backup, " ");
+                //      printf("backup after tok: %s\n", backup);
+                //      printf("pch after tok : %s\n", pcr);
+            }
+        } else {
+            cut_content(localpath, receiveMessage);
+        }
+    }
+
+    pthread_exit(NULL);
+}
